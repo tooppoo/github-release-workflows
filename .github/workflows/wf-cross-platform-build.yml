@@ -24,6 +24,7 @@ jobs:
       artifact_name: ${{ steps.config.outputs.artifact_name }}
       version_command: ${{ steps.config.outputs.version_command }}
       build_script: ${{ steps.config.outputs.build_script }}
+      build_dist: ${{ steps.config.outputs.build_dist }}
       archive_prefix: ${{ steps.config.outputs.archive_prefix }}
 
     steps:
@@ -64,6 +65,7 @@ jobs:
           echo "artifact_name=$(jq -r '.artifact_name // "artifacts"' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
           echo "version_command=$(jq -r '.version_command // ""' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
           echo "build_script=$(jq -r '.build_script' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
+          echo "build_dist=$(jq -r '.build_dist' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
           echo "archive_prefix=$(jq -r '.archive_prefix' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
 
   create_archive:
@@ -122,7 +124,7 @@ jobs:
           fi
 
           chmod +x "$build_script"
-          "./$build_script"
+          "./$build_script" ${{ matrix.target }} ${{ needs.load_config.outputs.build_dist }}
 
       - name: Package archive
         shell: bash
