@@ -105,7 +105,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           OS: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
-          OUT_DIR: ${{ github.workspace }}/build/bin
+          OUT_DIR: ${{ github.workspace }}/${{ needs.load_config.outputs.build_dist }}
         run: |
           set -euo pipefail
 
@@ -124,7 +124,7 @@ jobs:
           fi
 
           chmod +x "$build_script"
-          "./$build_script" ${{ matrix.target }} ${{ needs.load_config.outputs.build_dist }}
+          "./$build_script" "$TARGET" "$OUT_DIR"
 
       - name: Package archive
         shell: bash
