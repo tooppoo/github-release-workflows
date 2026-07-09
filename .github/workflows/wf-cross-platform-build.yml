@@ -8,8 +8,7 @@ on:
         type: string
         description: |
           Repository-relative path to the caller repository's cross-platform build manifest JSON file.
-          The manifest defines the build script, version command, archive naming, target matrix, archive format,
-          and files included in each target archive.
+          The manifest defines the build script, version command, archive naming, target matrix, archive format, and files included in each target archive.
           Example: https://github.com/tooppoo/github-release-workflows/blob/main/.github/workflows/wf-cross-platform-build/manifest.example.json
     outputs:
       artifact_name:
