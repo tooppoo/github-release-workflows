@@ -1,0 +1,253 @@
+name: Setup artifacts workflow
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        required: true
+        type: string
+    outputs:
+      artifact_name:
+        description: "The name of the artifact containing all archives"
+        value: ${{ jobs.setup_artifacts.outputs.artifact_name }}
+
+jobs:
+  load_config:
+    name: Load release artifact config
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+      artifact_name: ${{ steps.config.outputs.artifact_name }}
+      version_command: ${{ steps.config.outputs.version_command }}
+      build_script: ${{ steps.config.outputs.build_script }}
+      archive_prefix: ${{ steps.config.outputs.archive_prefix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate and expose config
+        id: config
+        shell: bash
+        env:
+          CONFIG_PATH: ${{ inputs.config_path }}
+        run: |
+          set -euo pipefail
+
+          case "$CONFIG_PATH" in
+            /*|*..*)
+              echo "config_path must be a repository-relative path without '..': $CONFIG_PATH" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "config file not found: $CONFIG_PATH" >&2
+            exit 1
+          fi
+
+          jq -e '
+            .schema == 1
+            and (.targets | type == "array")
+            and (.targets | length > 0)
+            and (.build_script | type == "string")
+            and (.archive_prefix | type == "string")
+          ' "$CONFIG_PATH" >/dev/null
+
+          matrix="$(jq -c '{ include: .targets }' "$CONFIG_PATH")"
+
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$(jq -r '.artifact_name // "artifacts"' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
+          echo "version_command=$(jq -r '.version_command // ""' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
+          echo "build_script=$(jq -r '.build_script' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
+          echo "archive_prefix=$(jq -r '.archive_prefix' "$CONFIG_PATH")" >> "$GITHUB_OUTPUT"
+
+  create_archive:
+    name: Create archive for ${{ matrix.os }} ${{ matrix.arch }}
+    needs: load_config
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load_config.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          VERSION_COMMAND: ${{ needs.load_config.outputs.version_command }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$VERSION_COMMAND" ]; then
+            version="$($VERSION_COMMAND)"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          OUT_DIR: ${{ github.workspace }}/build/bin
+        run: |
+          set -euo pipefail
+
+          build_script="${{ needs.load_config.outputs.build_script }}"
+
+          case "$build_script" in
+            /*|*..*)
+              echo "build_script must be a repository-relative path without '..': $build_script" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -f "$build_script" ]; then
+            echo "build script not found: $build_script" >&2
+            exit 1
+          fi
+
+          chmod +x "$build_script"
+          "./$build_script"
+
+      - name: Package archive
+        shell: bash
+        env:
+          ARCHIVE_FILES: ${{ toJSON(matrix.archive_files) }}
+          ARCHIVE_PREFIX: ${{ needs.load_config.outputs.archive_prefix }}
+          VERSION: ${{ steps.version.outputs.version }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+          ARCHIVE_KIND: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+
+          package_dir="dist/package"
+          rm -rf dist
+          mkdir -p "$package_dir"
+
+          echo "$ARCHIVE_FILES" | jq -e 'type == "array" and length > 0' >/dev/null
+
+          echo "$ARCHIVE_FILES" | jq -c '.[]' | while read -r item; do
+            path="$(echo "$item" | jq -r '.path')"
+            dest="$(echo "$item" | jq -r '.dest // (.path | split("/") | last)')"
+            required="$(echo "$item" | jq -r '.required // true')"
+
+            case "$path" in
+              /*|*..*)
+                echo "archive file path must be repository-relative without '..': $path" >&2
+                exit 1
+                ;;
+            esac
+
+            case "$dest" in
+              /*|*..*)
+                echo "archive dest must be archive-relative without '..': $dest" >&2
+                exit 1
+                ;;
+            esac
+
+            if [ ! -e "$path" ]; then
+              if [ "$required" = "true" ]; then
+                echo "archive file not found: $path" >&2
+                exit 1
+              fi
+              echo "optional archive file not found, skipped: $path"
+              continue
+            fi
+
+            mkdir -p "$package_dir/$(dirname "$dest")"
+
+            if [ -d "$path" ]; then
+              cp -R "$path" "$package_dir/$dest"
+            else
+              cp "$path" "$package_dir/$dest"
+            fi
+          done
+
+          base="${ARCHIVE_PREFIX}_${VERSION}_${OS}_${ARCH}"
+
+          if [ "$ARCHIVE_KIND" = "zip" ]; then
+            (
+              cd "$package_dir"
+              zip -r "../${base}.zip" .
+            )
+            archive="dist/${base}.zip"
+          elif [ "$ARCHIVE_KIND" = "tar.gz" ]; then
+            tar -czf "dist/${base}.tar.gz" -C "$package_dir" .
+            archive="dist/${base}.tar.gz"
+          else
+            echo "unsupported archive kind: $ARCHIVE_KIND" >&2
+            exit 1
+          fi
+
+          (
+            cd dist
+            file="$(basename "$archive")"
+            sha256sum "$file" > "checksum.${base}.txt"
+          )
+
+      - name: Upload archive and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksum.*.txt
+          if-no-files-found: error
+
+  setup_artifacts:
+    name: Setup artifacts with all archives
+    runs-on: ubuntu-latest
+    needs:
+      - load_config
+      - create_archive
+
+    outputs:
+      artifact_name: ${{ steps.output.outputs.artifact_name }}
+
+    steps:
+      - name: Get all sets of archive and checksum
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          pattern: archive-*
+          merge-multiple: true
+
+      - name: Collect files as artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          find downloaded -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 \
+            | xargs -0 -I{} cp "{}" dist/
+
+          cat downloaded/checksum.*.txt > dist/checksums.txt
+
+          version="$(find downloaded -maxdepth 1 -type f -name 'checksum.*.txt' | head -n 1)"
+          echo "Collected release artifacts:"
+          find dist -maxdepth 1 -type f -print
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.load_config.outputs.artifact_name }}
+          path: dist
+          if-no-files-found: error
+
+      - name: Output artifact name
+        id: output
+        run: echo "artifact_name=${{ needs.load_config.outputs.artifact_name }}" >> "$GITHUB_OUTPUT"
