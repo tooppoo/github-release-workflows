@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "artifact_name": "artifacts",
+  "version_command": "scripts/get-version",
+  "build_script": "scripts/build-release",
+  "archive_prefix": "sample",
+  "targets": [
+    {
+      "id": "linux-x86_64",
+      "runner": "ubuntu-24.04",
+      "os": "Linux",
+      "arch": "x86_64",
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "tar.gz",
+      "archive_files": [
+        { "path": "build/bin/sample", "dest": "sample" },
+        { "path": "LICENSE" },
+        { "path": "README.md" }
+      ]
+    },
+    {
+      "id": "linux-aarch64",
+      "runner": "ubuntu-24.04-arm",
+      "os": "Linux",
+      "arch": "aarch64",
+      "target": "aarch64-unknown-linux-gnu",
+      "archive": "tar.gz",
+      "archive_files": [
+        { "path": "build/bin/sample", "dest": "sample" },
+        { "path": "LICENSE" },
+        { "path": "README.md" }
+      ]
+    },
+    {
+      "id": "darwin-arm64",
+      "runner": "macos-15",
+      "os": "Darwin",
+      "arch": "arm64",
+      "target": "aarch64-apple-darwin",
+      "archive": "tar.gz",
+      "archive_files": [
+        { "path": "build/bin/sample", "dest": "sample" },
+        { "path": "LICENSE" },
+        { "path": "README.md" }
+      ]
+    },
+    {
+      "id": "windows-x86_64",
+      "runner": "windows-latest",
+      "os": "Windows",
+      "arch": "x86_64",
+      "target": "x86_64-pc-windows-msvc",
+      "archive": "zip",
+      "archive_files": [
+        { "path": "build/bin/sample.exe", "dest": "sample.exe" },
+        { "path": "LICENSE" },
+        { "path": "README.md" }
+      ]
+    }
+  ]
+}
