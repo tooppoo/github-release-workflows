@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   setup-artifacts:
-    uses: tooppoo/release-workflows/.github/workflows/_setup_artifacts.yml@v1
+    uses: tooppoo/release-workflows/.github/workflows/_setup_artifacts.yml@main
     with:
       config_path: .github/release-artifacts.json
 ```
