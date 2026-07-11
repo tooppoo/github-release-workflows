@@ -1,0 +1,343 @@
+name: Workflow for installer smoke test
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        required: true
+        type: string
+        description: |
+          Repository-relative path to the caller repository's release manifest.
+          The manifest must contain an installer_smoke_test section and targets.
+
+permissions:
+  contents: read
+
+jobs:
+  load_config:
+    name: Load installer smoke test config
+    runs-on: ubuntu-latest
+
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+      installer_script: ${{ steps.config.outputs.installer_script }}
+      command: ${{ steps.config.outputs.command }}
+      checks: ${{ steps.config.outputs.checks }}
+      latest_release_tag: ${{ steps.config.outputs.latest_release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Validate and expose config
+        id: config
+        shell: bash
+        env:
+          CONFIG_PATH: ${{ inputs.config_path }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          case "$CONFIG_PATH" in
+            /*|*..*)
+              echo "config_path must be repository-relative and must not contain '..': $CONFIG_PATH" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "config file not found: $CONFIG_PATH" >&2
+            exit 1
+          fi
+
+          jq -e '
+            .schema == 1
+
+            and (.targets | type == "array" and length > 0)
+
+            and all(.targets[];
+              (.id | type == "string" and test("^[A-Za-z0-9._-]+$"))
+              and (.runner | type == "string" and length > 0)
+              and (.os | type == "string" and length > 0)
+              and (.arch | type == "string" and length > 0)
+            )
+
+            and (
+              [.targets[].id]
+              | length == (unique | length)
+            )
+
+            and (.installer_smoke_test | type == "object")
+
+            and (
+              .installer_smoke_test.installer_script
+              | type == "string" and length > 0
+            )
+
+            and (
+              .installer_smoke_test.command
+              | type == "string"
+                and test("^[A-Za-z0-9._-]+$")
+            )
+
+            and (
+              (.installer_smoke_test.target_ids // [.targets[].id])
+              | type == "array" and length > 0
+            )
+
+            and (
+              (
+                .installer_smoke_test.target_ids
+                // [.targets[].id]
+              ) - [.targets[].id]
+              | length == 0
+            )
+
+            and (
+              (.installer_smoke_test.install_modes // ["latest"])
+              | type == "array" and length > 0
+            )
+
+            and all(
+              (.installer_smoke_test.install_modes // ["latest"])[];
+              . == "latest"
+              or . == "pinned-latest-release"
+            )
+
+            and (
+              .installer_smoke_test.checks
+              | type == "array" and length > 0
+            )
+
+            and all(.installer_smoke_test.checks[];
+              (.id
+                | type == "string"
+                  and test("^[A-Za-z0-9._-]+$")
+              )
+              and (.args | type == "array")
+              and all(.args[]; type == "string")
+            )
+
+            and (
+              [.installer_smoke_test.checks[].id]
+              | length == (unique | length)
+            )
+          ' "$CONFIG_PATH" >/dev/null
+
+          matrix="$(
+            jq -c '
+              . as $config
+
+              | (
+                  $config.installer_smoke_test.target_ids
+                  // [$config.targets[].id]
+                ) as $target_ids
+
+              | (
+                  $config.installer_smoke_test.install_modes
+                  // ["latest"]
+                ) as $install_modes
+
+              | {
+                  include: [
+                    $config.targets[]
+
+                    | select(
+                        .id as $id
+                        | $target_ids
+                        | index($id)
+                      )
+
+                    | . as $target
+
+                    | $install_modes[] as $install_mode
+
+                    | {
+                        id: $target.id,
+                        runner: $target.runner,
+                        os: $target.os,
+                        arch: $target.arch,
+                        install_mode: $install_mode
+                      }
+                  ]
+                }
+            ' "$CONFIG_PATH"
+          )"
+
+          latest_release_tag=""
+
+          if jq -e '
+            (
+              .installer_smoke_test.install_modes
+              // ["latest"]
+            )
+            | index("pinned-latest-release") != null
+          ' "$CONFIG_PATH" >/dev/null; then
+            latest_release_tag="$(
+              curl \
+                --fail \
+                --silent \
+                --show-error \
+                --location \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest" \
+                | jq -er '
+                    .tag_name
+                    | select(type == "string" and length > 0)
+                  '
+            )"
+          fi
+
+          {
+            echo "matrix=$matrix"
+            echo "installer_script=$(jq -r '.installer_smoke_test.installer_script' "$CONFIG_PATH")"
+            echo "command=$(jq -r '.installer_smoke_test.command' "$CONFIG_PATH")"
+            echo "checks=$(jq -c '.installer_smoke_test.checks' "$CONFIG_PATH")"
+            echo "latest_release_tag=$latest_release_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  installer_smoke_test:
+    name: >-
+      Installer smoke test
+      (${{ matrix.install_mode }})
+      for ${{ matrix.os }} (${{ matrix.arch }})
+
+    needs:
+      - load_config
+
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load_config.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install
+        id: install
+        shell: bash
+        env:
+          INSTALLER_SCRIPT: ${{ needs.load_config.outputs.installer_script }}
+          INSTALLED_COMMAND: ${{ needs.load_config.outputs.command }}
+          INSTALL_MODE: ${{ matrix.install_mode }}
+          TARGET_ID: ${{ matrix.id }}
+          LATEST_RELEASE_TAG: ${{ needs.load_config.outputs.latest_release_tag }}
+        run: |
+          set -euo pipefail
+
+          case "$INSTALLER_SCRIPT" in
+            /*|*..*)
+              echo "installer_script must be repository-relative and must not contain '..': $INSTALLER_SCRIPT" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -f "$INSTALLER_SCRIPT" ]; then
+            echo "installer script not found: $INSTALLER_SCRIPT" >&2
+            exit 1
+          fi
+
+          install_dir="$RUNNER_TEMP/installer-smoke-test/$TARGET_ID/$INSTALL_MODE"
+
+          rm -rf "$install_dir"
+          mkdir -p "$install_dir"
+
+          installer_args=(
+            --install-dir "$install_dir"
+          )
+
+          case "$INSTALL_MODE" in
+            latest)
+              ;;
+
+            pinned-latest-release)
+              if [ -z "$LATEST_RELEASE_TAG" ]; then
+                echo "latest release tag was not resolved" >&2
+                exit 1
+              fi
+
+              installer_args+=(
+                --version "$LATEST_RELEASE_TAG"
+              )
+              ;;
+
+            *)
+              echo "unsupported install mode: $INSTALL_MODE" >&2
+              exit 1
+              ;;
+          esac
+
+          sh "$INSTALLER_SCRIPT" "${installer_args[@]}"
+
+          command_path="$install_dir/$INSTALLED_COMMAND"
+
+          if [ ! -f "$command_path" ]; then
+            echo "installed command not found: $command_path" >&2
+            exit 1
+          fi
+
+          if [ ! -x "$command_path" ]; then
+            echo "installed command is not executable: $command_path" >&2
+            exit 1
+          fi
+
+          echo "command_path=$command_path" >> "$GITHUB_OUTPUT"
+
+      - name: Run smoke checks
+        shell: bash
+        env:
+          COMMAND_PATH: ${{ steps.install.outputs.command_path }}
+          CHECKS: ${{ needs.load_config.outputs.checks }}
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const { spawnSync } = require("node:child_process");
+
+          const commandPath = process.env.COMMAND_PATH;
+          const checks = JSON.parse(process.env.CHECKS);
+
+          for (const check of checks) {
+            console.log(`::group::Smoke check: ${check.id}`);
+            console.log(
+              [commandPath, ...check.args]
+                .map((value) => JSON.stringify(value))
+                .join(" ")
+            );
+
+            const result = spawnSync(commandPath, check.args, {
+              stdio: "inherit",
+              shell: false,
+            });
+
+            console.log("::endgroup::");
+
+            if (result.error) {
+              console.error(
+                `failed to execute smoke check ${check.id}:`,
+                result.error
+              );
+              process.exit(1);
+            }
+
+            if (result.signal) {
+              console.error(
+                `smoke check ${check.id} terminated by signal ${result.signal}`
+              );
+              process.exit(1);
+            }
+
+            if (result.status !== 0) {
+              console.error(
+                `smoke check ${check.id} exited with status ${result.status}`
+              );
+              process.exit(result.status ?? 1);
+            }
+          }
+          NODE
