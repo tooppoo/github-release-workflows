@@ -1,7 +1,7 @@
 {
-  "name": "template-dev",
+  "name": "github-release-workflows-dev",
   "image": "mcr.microsoft.com/devcontainers/base:2.1.9-trixie",
-  "workspaceFolder": "/workspaces/fizz",
+  "workspaceFolder": "/workspaces/github-release-workflows",
   "remoteUser": "vscode",
   "runArgs": [
     "--init"
