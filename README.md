@@ -1,1 +1,1 @@
-# template-dev
+# github-release-workflows
